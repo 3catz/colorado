@@ -1,0 +1,136 @@
+---
+title: "NYPD Shooting Incident Data Analysis"
+author: "Peijin Chen"
+date: "6/7/2021"
+output: pdf_document
+---
+
+# NYPD Shooting Incident Data
+
+The New York City Police Dept (NYPD) publishes shooting data as part of the [New York City Open Data portal.](https://data.cityofnewyork.us/Public-Safety/NYPD-Shooting-Incident-Data-Historic-/833y-fsy8) Here we analyze the historic shooting data to ascertain if there are any patterns or groupings in the data with respect to the incidents that result in murder (death as a direct result of the shooting incident). The data considered here ranges from 1/1/2016 to 12/31/2020. Our aim to analyze the relationship of the incidents to borough, precinct, and time of day. In particular, we are interested in the subset of shooting incidents that ended in murder. The data feature that captures this data is "STATISTICAL_MURDER_FLAG", which in the original data has the string values of "false" and "true", which we then convert into integers {0,1}, with "true" mapped to 1 and "false" mapped to 0. This integer encoding is then converted in factors in order to facilitate the use of classification algorithms and models.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(lubridate)
+library(dplyr)
+NYPD_Shooting_Incident_Data__Historic_ <- read.csv("/cloud/project/NYPD_Shooting_Incident_Data__Historic_.csv", stringsAsFactors=TRUE)
+mydata <- NYPD_Shooting_Incident_Data__Historic_
+mydata$STATISTICAL_MURDER_FLAG <- as.logical(mydata$STATISTICAL_MURDER_FLAG)
+mydata$STATISTICAL_MURDER_FLAG <- as.integer(mydata$STATISTICAL_MURDER_FLAG)
+mydata$STATISTICAL_MURDER_FLAG <- as.factor(mydata$STATISTICAL_MURDER_FLAG)
+mydata$PRECINCT <- as.factor(mydata$PRECINCT)
+```
+
+## Rounding the Time
+
+In order to simplify and reduce the cardinality of the "OCCUR_TIME" feature, we round the time of occurrence to the nearest hour--that is, we use a floor function on the time. Thus our hours are encoded as integers in the rnage {0,1,....23}. We then convert these integers into factors.
+
+```{r summary}
+library(lubridate)
+segs <- lubridate::hms(mydata$OCCUR_TIME)
+segs <- lubridate::hour(segs)
+segs <- as.factor(segs)
+#segs
+mydata$HOUR <- segs
+is.factor(mydata$HOUR)
+```
+
+```{r date_rounding}
+sdates <- lubridate::mdy(mydata$OCCUR_DATE)
+smonths <- lubridate::month(sdates)
+mydata$MONTH <- smonths
+mydata$MONTH <- as.factor(mydata$MONTH)
+```
+
+## Shooting Incident Time Distribution
+
+Let us take a look at the times when the shootings occur.
+
+```{r time_plots, echo=FALSE}
+
+ggplot(mydata, aes(x = HOUR)) + geom_bar()
+
+```
+
+Let's also look at a monthly distribution
+
+```{r months_shootings}
+
+ggplot(mydata, aes(x = MONTH)) + geom_bar()
+
+```
+
+## Shooting Incident Borough Distribution
+
+We can also take a look at the boroughs where the incidents have occurred.
+
+```{r boro_plot, echo=FALSE}
+ggplot(mydata, aes(x = BORO)) + geom_bar()
+```
+
+## Shooting Incident Precinct Distribution (Top 10)
+
+We can see the top 10 precincts in terms of recorded shooting incidents.
+
+```{r precinct_plot, echo=FALSE}
+
+top_murder_precincts <- mydata %>% count(PRECINCT, sort = TRUE)
+
+ggplot(top_murder_precincts[c(1,2,3,4,5,6,7,8,9,10),], aes(x = PRECINCT, y = n)) + geom_bar(stat = "identity")
+```
+
+## Modeling Murders with Logistic Regression
+
+We can use a simple logistic regression model to see if we can predict or classify when a murder will occur. In the interest of fairness, we leave out racial/ethnic attributes and simply focus on the borough, precinct, time of occurrence. The library we use is the well-known autoML library h2o, within which we are using the glm (generalized linear model) function to create a logistic regression model.
+
+```{r h2o_section, message=FALSE, warning=FALSE, echo = FALSE}
+library(h2o)
+h2o.init()
+hdata <- as.h2o(mydata)
+hdata["STATISTICAL_MURDER_FLAG"] <- as.factor(hdata["STATISTICAL_MURDER_FLAG"])
+h2o.describe(hdata)
+```
+
+We then stipulate the subset of features that we use as predictors. We found that including "MONTH" as a predictor/feature decreased the overall accuracy of the model. We excluded anything about the victim, because that is not something that anyone might know beforehand, whereas it is possible, based on a 911 call for example, to know what precinct the shooting is happening in, what borough it is in, what kind of building it is in (LOCATION_DESC), and sometimes, the gender of the shooter.
+
+```{r x_and_y}
+
+predictors <- h2o.colnames(hdata)
+predictors <- c("BORO","PRECINCT","HOUR", "LOCATION_DESC","PERP_SEX")
+response <- "STATISTICAL_MURDER_FLAG"
+```
+
+Here, we create the model, using a logistic regression model. We do not use any training/validation split,
+
+```{r log_reg_model, echo = FALSE}
+z <- c(1)
+glm <- h2o.glm(family = "binomial",
+                        x = predictors,
+                        y = response,
+                        training_frame = hdata,
+                        alpha = 0.5,
+                        #HGLM = TRUE,
+                        #random_columns = z,
+                        #lambda = 0
+              )
+
+
+```
+
+Next we can assess the performance of the logistic regression model using a confusion matrix. We can see the error rates for the classes are 46.6% and 38.1%.
+
+```{r performance}
+perf <- h2o.performance(glm)
+```
+
+```{r confusion}
+CM <- perf@metrics[["cm"]][["table"]]
+knitr::kable(CM,"pipe")
+```
+
+## Conclusion
+
+We can see that the model has a high false positive rate. It can exploit certain patterns that exist in the times, borough, and precinct features, but this feature subset alone is not discriminative enough to create a skilled classification model. The overall error rate is 45.7%. The overall rate of murder is (4488/23568) = 19%. A dummy classifier that just guessed the majority category (NOT MURDER or 0), would therefore be right 81% of the time.
